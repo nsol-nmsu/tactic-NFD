@@ -187,6 +187,32 @@ public: // triggers
    */
   virtual void
   onDroppedInterest(const Face& outFace, const Interest& interest);
+  
+  /** \brief Called just as an interest is received by the forwarder
+  *
+  * Allows the implementation to preprocess/modify the interest before
+  * it's handed off to the forwarder's main functionality.  If this
+  * routine returns false then the forwarder will just drop/ignore
+  * the interest, without further processing.
+  *
+  * \return True if the forwarder should handle the interest,
+  *         false otherwise.
+  */
+  virtual bool
+  processInterest( const Face& inFace, Interest& interest ){ return true; };
+  
+  /** \brief Called just as an interest is received by the forwarder
+  *
+  * Allows the implementation to preprocess/modify the data before
+  * it's handed off to the forwarder's main functionality.  If this
+  * routine returns false then the forwarder will just drop/ignore
+  * the data, without further processing.
+  *
+  * \return True if the forwarder should handle the interest,
+  *         false otherwise.
+  */
+  virtual bool
+  processData( const Face& inFace, Data& data ){ return true; };
 
 protected: // actions
   /** \brief send Interest to outFace

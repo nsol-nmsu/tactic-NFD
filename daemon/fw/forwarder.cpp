@@ -134,27 +134,41 @@ Forwarder::onIncomingInterest(Face& inFace, const Interest& interest)
 
   // cancel unsatisfy & straggler timer
   this->cancelUnsatisfyAndStragglerTimer(*pitEntry);
+  
+  // Mutable copy for preprocessing.
+  auto interestCopy = std::make_shared<Interest>( interest );
+  bool shouldProcess;
+  this->dispatchToStrategy(
+    *pitEntry,
+    [&]( fw::Strategy& s ){
+        shouldProcess = s.processInterest( inFace, *interestCopy );
+    }
+  );
+  if( !shouldProcess ) {
+    pitEntry->deleteInRecord( inFace );
+    return;
+  }
 
   const pit::InRecordCollection& inRecords = pitEntry->getInRecords();
   bool isPending = inRecords.begin() != inRecords.end();
   if (!isPending) {
     if (m_csFromNdnSim == nullptr) {
-      m_cs.find(interest,
+      m_cs.find(*interestCopy,
                 bind(&Forwarder::onContentStoreHit, this, ref(inFace), pitEntry, _1, _2),
                 bind(&Forwarder::onContentStoreMiss, this, ref(inFace), pitEntry, _1));
     }
     else {
-      shared_ptr<Data> match = m_csFromNdnSim->Lookup(interest.shared_from_this());
+      shared_ptr<Data> match = m_csFromNdnSim->Lookup(interestCopy->shared_from_this());
       if (match != nullptr) {
-        this->onContentStoreHit(inFace, pitEntry, interest, *match);
+        this->onContentStoreHit(inFace, pitEntry, *interestCopy, *match);
       }
       else {
-        this->onContentStoreMiss(inFace, pitEntry, interest);
+        this->onContentStoreMiss(inFace, pitEntry, *interestCopy);
       }
     }
   }
   else {
-    this->onContentStoreMiss(inFace, pitEntry, interest);
+    this->onContentStoreMiss(inFace, pitEntry, *interestCopy);
   }
 }
 
@@ -310,7 +324,7 @@ Forwarder::onIncomingData(Face& inFace, const Data& data)
     // (drop)
     return;
   }
-
+  
   // PIT match
   pit::DataMatchResult pitMatches = m_pit.findAllDataMatches(data);
   if (pitMatches.begin() == pitMatches.end()) {
@@ -328,46 +342,59 @@ Forwarder::onIncomingData(Face& inFace, const Data& data)
   else
     m_csFromNdnSim->Add(dataCopyWithoutTag);
 
-  std::set<Face*> pendingDownstreams;
+  std::map<Face*, std::shared_ptr<Data> > pendingDownstreams;
+  
   // foreach PitEntry
   auto now = time::steady_clock::now();
   for (const shared_ptr<pit::Entry>& pitEntry : pitMatches) {
     NFD_LOG_DEBUG("onIncomingData matching=" << pitEntry->getName());
 
+    // Mutable data copy for preprocessing.
+    auto dataCopy = std::make_shared<Data>( data );
+    bool shouldProcess;
+    this->dispatchToStrategy(
+        *pitEntry,
+        [&]( fw::Strategy& s ) {
+            shouldProcess = s.processData( inFace, *dataCopy );
+        }
+    );
+    if( !shouldProcess )
+        continue;
+    
     // cancel unsatisfy & straggler timer
     this->cancelUnsatisfyAndStragglerTimer(*pitEntry);
 
     // remember pending downstreams
     for (const pit::InRecord& inRecord : pitEntry->getInRecords()) {
       if (inRecord.getExpiry() > now) {
-        pendingDownstreams.insert(&inRecord.getFace());
+        pendingDownstreams[&inRecord.getFace()] = dataCopy;
       }
     }
 
     // invoke PIT satisfy callback
-    beforeSatisfyInterest(*pitEntry, inFace, data);
+    beforeSatisfyInterest(*pitEntry, inFace, *dataCopy);
     this->dispatchToStrategy(*pitEntry,
       [&] (fw::Strategy& strategy) { strategy.beforeSatisfyInterest(pitEntry, inFace, data); });
 
     // Dead Nonce List insert if necessary (for out-record of inFace)
-    this->insertDeadNonceList(*pitEntry, true, data.getFreshnessPeriod(), &inFace);
+    this->insertDeadNonceList(*pitEntry, true, dataCopy->getFreshnessPeriod(), &inFace);
 
     // mark PIT satisfied
     pitEntry->clearInRecords();
     pitEntry->deleteOutRecord(inFace);
 
     // set PIT straggler timer
-    this->setStragglerTimer(pitEntry, true, data.getFreshnessPeriod());
+    this->setStragglerTimer(pitEntry, true, dataCopy->getFreshnessPeriod());
   }
 
   // foreach pending downstream
-  for (Face* pendingDownstream : pendingDownstreams) {
-    if (pendingDownstream->getId() == inFace.getId() &&
-        pendingDownstream->getLinkType() != ndn::nfd::LINK_TYPE_AD_HOC) {
+  for (auto& p : pendingDownstreams) {
+    if (p.first->getId() == inFace.getId() &&
+        p.first->getLinkType() != ndn::nfd::LINK_TYPE_AD_HOC) {
       continue;
     }
     // goto outgoing Data pipeline
-    this->onOutgoingData(data, *pendingDownstream);
+    this->onOutgoingData(*p.second, *p.first);
   }
 }
 
